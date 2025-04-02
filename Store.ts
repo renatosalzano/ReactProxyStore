@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, createElement, ComponentType } from "react";
 
 type Fn = (...params: unknown[]) => unknown;
 
@@ -13,7 +13,7 @@ export function create<T extends object>(init: T) {
     init = {} as T;
   }
 
-  const listeners: Record<keyof T, ((store: T) => void)[]> = {} as Record<keyof T, ((store: T) => void)[]>;
+  const listeners = {} as Record<keyof T, ((store: Getters) => void)[]>;
 
   const getters = {} as Getters;
   const setters = {} as Setters;
@@ -30,7 +30,7 @@ export function create<T extends object>(init: T) {
 
       if (listeners[k as keyof T]) {
         listeners[k as keyof T].forEach((notify) => {
-          notify(t as T);
+          notify(t as Getters);
         });
       }
 
@@ -46,7 +46,7 @@ export function create<T extends object>(init: T) {
     }
   }
 
-  const subscribe = <K extends keyof T>(key: K, fn: (store: T) => void) => {
+  const subscribe = <K extends keyof T>(key: K, fn: (store: Getters) => void) => {
     if (!listeners[key]) listeners[key] = [];
     const index = listeners[key].push(fn) - 1;
 
@@ -56,28 +56,35 @@ export function create<T extends object>(init: T) {
   };
 
   function useStore(): T {
+
     const [state, setState] = useState<Partial<T>>(getters);
 
-    const dependecies = new Set<keyof T>();
+    const isMounted = useRef(false);
+    const dependecies = useRef(new Set<keyof Getters>());
 
-    const updateFn = (store: T) => {
+    const updateFn = (store: Getters) => {
       setState((prev) => ({ ...prev, ...store }));
     };
 
     const trap = useRef(new Proxy(state, {
       get(t, k) {
-        if (!dependecies.has(k as keyof T)) {
-          dependecies.add(k as keyof T);
+        if (!isMounted.current) {
+          console.log("trigger get");
+          if (!dependecies.current.has(k as keyof T)) {
+            dependecies.current.add(k as keyof T);
+          }
         }
         return Reflect.get(t, k);
       }
-    }));
+    })).current;
 
     useEffect(() => {
+
+      isMounted.current = true;
       // subscribe
       const unsubs: (() => void)[] = [];
 
-      for (const key of dependecies) {
+      for (const key of dependecies.current) {
         unsubs.push(subscribe(key, updateFn));
       }
 
@@ -89,7 +96,21 @@ export function create<T extends object>(init: T) {
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    return { ...trap.current, ...setters } as T;
+    return Object.assign(trap, setters) as T;
+  }
+
+  function watch(keys: (keyof T)[], callback: (store: Getters) => void) {
+    const unsubs: (() => void)[] = [];
+
+    for (const k of keys) {
+      unsubs.push(subscribe(k, callback))
+    }
+
+    return () => {
+      for (const unsubscribe of unsubs) {
+        unsubscribe();
+      }
+    }
   }
 
   useStore.setState = (partial: Partial<Getters> | ((prevState: Readonly<Getters>) => Partial<Getters>)) => {
@@ -113,9 +134,35 @@ export function create<T extends object>(init: T) {
     return getters;
   };
 
+
+  useStore.connect = <C>(
+    Component: C,
+    map?: (store: Readonly<T>) => Partial<T>
+  ): ComponentType<Partial<T>> => {
+
+    const storeProps = map ? map(store) : store;
+
+    return (props: Partial<T>) => {
+
+      const [state, update] = useState(getters);
+      const updateFn = (store: Getters) => update((p) => ({ ...p, ...store }));
+
+      useEffect(() => {
+        const unwatch = watch(Object.keys(storeProps) as (keyof T)[], updateFn)
+        return () => {
+          unwatch()
+        }
+      })
+
+      return createElement(Component as ComponentType, { ...props, ...state });
+    }
+
+  }
+
   return useStore as {
     (): T,
     setState: typeof useStore.setState,
-    getState: typeof useStore.getState
+    getState: typeof useStore.getState,
+    connect: typeof useStore.connect
   };
 }
